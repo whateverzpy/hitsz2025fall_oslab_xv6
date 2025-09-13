@@ -16,16 +16,18 @@ int main(int argc, char *argv[]) {
 }
 
 void find(char *path, char *target) {
-  char buf[512], *p;
-  int fd;
-  struct dirent de;
-  struct stat st;
+  char buf[512], *p;  // 用于构建新的路径
+  int fd;             // 文件描述符
+  struct dirent de;   // 目录项
+  struct stat st;     // 文件状态
 
+  //  打开路径
   if ((fd = open(path, 0)) < 0) {
     fprintf(2, "find: cannot open %s\n", path);
     return;
   }
 
+  // 获取文件状态
   if (fstat(fd, &st) < 0) {
     fprintf(2, "find: cannot stat %s\n", path);
     close(fd);
@@ -35,11 +37,13 @@ void find(char *path, char *target) {
   switch (st.type) {
     case T_FILE:
       // 如果是文件，检查文件名是否匹配目标名称
-      p = path + strlen(path);
+      p = path + strlen(path);  // 指向路径字符串的末尾
+
+      // 找到文件名的开始位置
       while (p >= path && *p != '/') {
         p--;
       }
-      p++;  // 跳过'/'或指向字符串开头
+      p++;  // 指向字符串开头
 
       if (strcmp(p, target) == 0) {
         printf("%s\n", path);
@@ -52,7 +56,7 @@ void find(char *path, char *target) {
       while (p >= path && *p != '/') {
         p--;
       }
-      p++;  // 跳过'/'或指向字符串开头
+      p++;  // 指向字符串开头
 
       if (strcmp(p, target) == 0) {
         printf("%s\n", path);
@@ -63,16 +67,19 @@ void find(char *path, char *target) {
         printf("find: path too long\n");
         break;
       }
+
+      // 使用buf构建新的路径
       strcpy(buf, path);
-      p = buf + strlen(buf);
+      p = buf + strlen(buf);  // 指向路径字符串的末尾
       *p++ = '/';
 
       while (read(fd, &de, sizeof(de)) == sizeof(de)) {
+        // 跳过空的目录项
         if (de.inum == 0) {
           continue;
         }
 
-        // 跳过 "." 和 ".." 目录
+        // 跳过当前目录和父目录
         if (strcmp(de.name, ".") == 0 || strcmp(de.name, "..") == 0) {
           continue;
         }
