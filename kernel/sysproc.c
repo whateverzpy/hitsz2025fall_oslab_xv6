@@ -85,3 +85,51 @@ uint64 sys_rename(void) {
   p->name[len] = '\0';
   return 0;
 }
+
+uint64 sys_yield(void) {
+  struct proc *p = myproc();
+
+  // 打印当前进程内核线程上下文被保存的地址范围
+  uint64 context_start = (uint64)&p->context;
+  uint64 context_end = context_start + sizeof(struct context);
+  printf("Save the context of the process to the memory region from address %p to %p\n", context_start, context_end);
+
+  // 打印当前进程的pid和用户态pc值（陷入内核的指令地址）
+  printf("Current running process pid is %d and user pc is %p\n", p->pid, p->trapframe->epc);
+
+  // 模拟调度器找到下一个RUNNABLE的进程
+  struct proc *next_proc = 0;
+  struct proc *pp;
+
+  // 从当前进程的下一个进程开始环形遍历
+  for (pp = p + 1; pp != p; pp++) {
+    // 如果到了进程表末尾，回到开头
+    if (pp >= &proc[NPROC]) {
+      pp = proc;
+    }
+    // 如果回到了当前进程，跳出循环
+    if (pp == p) {
+      break;
+    }
+
+    acquire(&pp->lock);
+    if (pp->state == RUNNABLE) {
+      next_proc = pp;
+      // 打印下一个将要被调度的进程信息
+      printf("Next runnable process pid is %d and user pc is %p\n", pp->pid, pp->trapframe->epc);
+      release(&pp->lock);
+      break;
+    }
+    release(&pp->lock);
+  }
+
+  // 如果没找到其他RUNNABLE进程，说明只有当前进程可运行
+  if (next_proc == 0) {
+    printf("Next runnable process pid is %d and user pc is %p\n", p->pid, p->trapframe->epc);
+  }
+
+  // 调用内核已实现的yield函数让出CPU
+  yield();
+
+  return 0;
+}
