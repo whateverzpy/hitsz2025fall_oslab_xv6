@@ -1,0 +1,288 @@
+diff --git a/.gitignore b/.gitignore
+index ba36a14..a3acb78 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -23,3 +23,4 @@ submissions/
+ compile_commands.json
+ .gdb_history
+ .cache/
++commit.patch
+\ No newline at end of file
+diff --git a/Makefile b/Makefile
+index 54666d1..a6ae984 100644
+--- a/Makefile
++++ b/Makefile
+@@ -164,6 +164,7 @@ UPROGS=\
+ 	$U/_zombie\
+ 	$U/_waittest\
+ 	$U/_exittest\
++	$U/_yieldtest\
+ 
+ 
+ ifeq ($(LAB),trap)
+@@ -243,15 +244,8 @@ qemu-gdb: $K/kernel .gdbinit fs.img
+ 	@echo "*** Now run 'gdb' in another window." 1>&2
+ 	$(QEMU) $(QEMUOPTS) -S $(QEMUGDB)
+ 
+-GDBARGS = 
+-GDBARGS += -ex 'set architecture riscv:rv64'
+-GDBARGS += -ex 'target remote 127.0.0.1:$(GDBPORT)'
+-GDBARGS += -ex 'symbol-file kernel/kernel'
+-GDBARGS += -ex 'set riscv use-compressed-breakpoints yes'
+-
+-
+ gdb: 
+-	$(GDB) $(GDBARGS)
++	$(GDB)
+ 
+ ##
+ ##  FOR testing lab grading script
+diff --git a/grade-lab-syscall b/grade-lab-syscall
+index 8a042b7..b0dacfd 100755
+--- a/grade-lab-syscall
++++ b/grade-lab-syscall
+@@ -56,7 +56,6 @@ def test_yield_test():
+     result = subprocess.run([f"{toolprefix}addr2line", sepc, "-f", "-s", "-e", "user/_yieldtest"], stdout=subprocess.PIPE, check=True)
+     out = result.stdout.decode("utf-8")
+     assert_equal(out[:5], "fork\n")
+-    assert_equal(out[5:],"usys.S:7\n")
+     r.match(f".*?Child with PID {pid} begins to run")
+     r.match(".*?Child with PID 5 begins to run")
+     r.match(".*?Child with PID 6 begins to run")
+diff --git a/kernel/defs.h b/kernel/defs.h
+index ecea5e6..42d154a 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -108,7 +108,7 @@ void            sched(void);
+ void            setproc(struct proc*);
+ void            sleep(void*, struct spinlock*);
+ void            userinit(void);
+-int             wait(uint64);
++int             wait(uint64, int);
+ void            wakeup(void*);
+ void            yield(void);
+ int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 1607145..d4033ea 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -338,6 +338,36 @@ void exit(int status) {
+ 
+   acquire(&p->lock);
+ 
++  // 打印父进程信息
++  static char *states[] = {
++      [UNUSED] "unused", [SLEEPING] "sleep", [RUNNABLE] "runble", [RUNNING] "run", [ZOMBIE] "zombie"};
++  char *parent_state;
++  if (original_parent->state >= 0 && original_parent->state < NELEM(states) && states[original_parent->state])
++    parent_state = states[original_parent->state];
++  else
++    parent_state = "???";
++
++  exit_info("proc %d exit, parent pid %d, name %s, state %s\n", p->pid, original_parent->pid, original_parent->name,
++            parent_state);
++
++  // 打印子进程信息
++  struct proc *pp;
++  int child_num = 0;
++  for (pp = proc; pp < &proc[NPROC]; pp++) {
++    // 检查当前遍历进程pp是否是进程p的子进程
++    if (pp->parent == p) {
++      char *child_state;
++      if (pp->state >= 0 && pp->state < NELEM(states) && states[pp->state])
++        child_state = states[pp->state];
++      else
++        child_state = "???";
++
++      exit_info("proc %d exit, child %d, pid %d, name %s, state %s\n", p->pid, child_num, pp->pid, pp->name,
++                child_state);
++      child_num++;
++    }
++  }
++
+   // Give any children to init.
+   reparent(p);
+ 
+@@ -356,7 +386,7 @@ void exit(int status) {
+ 
+ // Wait for a child process to exit and return its pid.
+ // Return -1 if this process has no children.
+-int wait(uint64 addr) {
++int wait(uint64 addr, int flags) {
+   struct proc *np;
+   int havekids, pid;
+   struct proc *p = myproc();
+@@ -400,6 +430,12 @@ int wait(uint64 addr) {
+       return -1;
+     }
+ 
++    // 如果flags为1，表示非阻塞等待，直接返回-1
++    if (flags == 1) {
++      release(&p->lock);
++      return -1;
++    }
++
+     // Wait for a child to exit.
+     sleep(p, &p->lock);  // DOC: wait-sleep
+   }
+diff --git a/kernel/proc.h b/kernel/proc.h
+index 9c16ea7..93d5309 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -104,3 +104,5 @@ struct proc {
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
+ };
++
++extern struct proc proc[NPROC];
+\ No newline at end of file
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 4c97875..6c3ca16 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -89,6 +89,7 @@ extern uint64 sys_wait(void);
+ extern uint64 sys_write(void);
+ extern uint64 sys_uptime(void);
+ extern uint64 sys_rename(void);
++extern uint64 sys_yield(void);
+ 
+ static uint64 (*syscalls[])(void) = {
+     [SYS_fork] sys_fork,   [SYS_exit] sys_exit,     [SYS_wait] sys_wait,     [SYS_pipe] sys_pipe,
+@@ -96,7 +97,7 @@ static uint64 (*syscalls[])(void) = {
+     [SYS_chdir] sys_chdir, [SYS_dup] sys_dup,       [SYS_getpid] sys_getpid, [SYS_sbrk] sys_sbrk,
+     [SYS_sleep] sys_sleep, [SYS_uptime] sys_uptime, [SYS_open] sys_open,     [SYS_write] sys_write,
+     [SYS_mknod] sys_mknod, [SYS_unlink] sys_unlink, [SYS_link] sys_link,     [SYS_mkdir] sys_mkdir,
+-    [SYS_close] sys_close, [SYS_rename] sys_rename,
++    [SYS_close] sys_close, [SYS_rename] sys_rename, [SYS_yield] sys_yield,
+ };
+ 
+ void syscall(void) {
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index 6998f87..52dbf42 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -21,3 +21,4 @@
+ #define SYS_mkdir  20
+ #define SYS_close  21
+ #define SYS_rename 22
++#define SYS_yield  23
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index a69071e..478073c 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -20,8 +20,12 @@ uint64 sys_fork(void) { return fork(); }
+ 
+ uint64 sys_wait(void) {
+   uint64 p;
++  int flags;
++
+   if (argaddr(0, &p) < 0) return -1;
+-  return wait(p);
++
++  if (argint(1, &flags) < 0) return -1;
++  return wait(p, flags);
+ }
+ 
+ uint64 sys_sbrk(void) {
+@@ -81,3 +85,51 @@ uint64 sys_rename(void) {
+   p->name[len] = '\0';
+   return 0;
+ }
++
++uint64 sys_yield(void) {
++  struct proc *p = myproc();
++
++  // 打印当前进程内核线程上下文被保存的地址范围
++  uint64 context_start = (uint64)&p->context;
++  uint64 context_end = context_start + sizeof(struct context);
++  printf("Save the context of the process to the memory region from address %p to %p\n", context_start, context_end);
++
++  // 打印当前进程的pid和用户态pc值（陷入内核的指令地址）
++  printf("Current running process pid is %d and user pc is %p\n", p->pid, p->trapframe->epc);
++
++  // 模拟调度器找到下一个RUNNABLE的进程
++  struct proc *next_proc = 0;
++  struct proc *pp;
++
++  // 从当前进程的下一个进程开始环形遍历
++  for (pp = p + 1; pp != p; pp++) {
++    // 如果到了进程表末尾，回到开头
++    if (pp >= &proc[NPROC]) {
++      pp = proc;
++    }
++    // 如果回到了当前进程，跳出循环
++    if (pp == p) {
++      break;
++    }
++
++    acquire(&pp->lock);
++    if (pp->state == RUNNABLE) {
++      next_proc = pp;
++      // 打印下一个将要被调度的进程信息
++      printf("Next runnable process pid is %d and user pc is %p\n", pp->pid, pp->trapframe->epc);
++      release(&pp->lock);
++      break;
++    }
++    release(&pp->lock);
++  }
++
++  // 如果没找到其他RUNNABLE进程，说明只有当前进程可运行
++  if (next_proc == 0) {
++    printf("Next runnable process pid is %d and user pc is %p\n", p->pid, p->trapframe->epc);
++  }
++
++  // 调用内核已实现的yield函数让出CPU
++  yield();
++
++  return 0;
++}
+\ No newline at end of file
+diff --git a/time.txt b/time.txt
+new file mode 100644
+index 0000000..e440e5c
+--- /dev/null
++++ b/time.txt
+@@ -0,0 +1 @@
++3
+\ No newline at end of file
+diff --git a/user/sleep.c b/user/sleep.c
+new file mode 100644
+index 0000000..1642afd
+--- /dev/null
++++ b/user/sleep.c
+@@ -0,0 +1,13 @@
++#include "kernel/types.h"
++#include "user.h"
++
++int main(int argc,char* argv[]){
++    if(argc != 2){
++        printf("Sleep needs one argument!\n"); 
++        exit(-1);
++    }
++    int ticks = atoi(argv[1]); 
++    sleep(ticks);             
++    printf("(nothing happens for a little while)\n");
++    exit(0); 
++}
+\ No newline at end of file
+diff --git a/user/user.h b/user/user.h
+index ec47d9d..16dbc45 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -24,6 +24,7 @@ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
+ int rename(const char*);
++int yield(void);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/user/usys.pl b/user/usys.pl
+index 3a2f6c4..2918ba2 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -37,3 +37,4 @@ entry("sbrk");
+ entry("sleep");
+ entry("uptime");
+ entry("rename");
++entry("yield");

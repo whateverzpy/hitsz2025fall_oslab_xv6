@@ -21,7 +21,7 @@ void find(char *path, char *target) {
   struct dirent de;   // 目录项
   struct stat st;     // 文件状态
 
-  //  打开路径
+  // 打开路径
   if ((fd = open(path, 0)) < 0) {
     fprintf(2, "find: cannot open %s\n", path);
     return;
@@ -63,7 +63,7 @@ void find(char *path, char *target) {
       }
 
       // 然后递归搜索目录内容
-      if (strlen(path) + 1 + DIRSIZ + 1 > sizeof buf) {
+      if (strlen(path) + 1 + DIRSIZ + 1 > sizeof buf) {  // 检查路径长度是否超出缓冲区大小
         printf("find: path too long\n");
         break;
       }
@@ -84,6 +84,7 @@ void find(char *path, char *target) {
           continue;
         }
 
+        // 构建新的路径
         memmove(p, de.name, DIRSIZ);
         p[DIRSIZ] = 0;
 
