@@ -372,6 +372,47 @@ int copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max) {
   }
 }
 
+// 递归打印页表项
+// pagetable: 当前页表的物理地址
+// level: 当前页表的层级 (2, 1, 0)
+// va_prefix: 上层构建的虚拟地址前缀
+void vmprint_recursive(pagetable_t pagetable, int level, uint64 va_prefix) {
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = pagetable[i];
+
+    // 只打印有效的PTE
+    if (pte & PTE_V) {
+      // 打印缩进
+      for (int l = 2; l > level; l--) {
+        printf("||   ");
+      }
+      printf("||");
+
+      // 检查PTE是否为叶子节点
+      if ((pte & (PTE_R | PTE_W | PTE_X)) != 0) {
+        // 叶子节点
+        uint64 va = va_prefix | ((uint64)i << (12 + 9 * level));
+        printf("idx: %d: va: %p -> pa: %p, flags: %s%s%s%s\n", i, va, PTE2PA(pte), (pte & PTE_R) ? "r" : "-",
+               (pte & PTE_W) ? "w" : "-", (pte & PTE_X) ? "x" : "-", (pte & PTE_U) ? "u" : "-");
+      } else {
+        // 中间节点 (指向下一级页表)
+        printf("idx: %d: pa: %p, flags: ----\n", i, PTE2PA(pte));
+
+        // 递归进入下一层
+        uint64 next_va_prefix = va_prefix | ((uint64)i << (12 + 9 * level));
+        pagetable_t child_pgtbl = (pagetable_t)PTE2PA(pte);
+        vmprint_recursive(child_pgtbl, level - 1, next_va_prefix);
+      }
+    }
+  }
+}
+
+void vmprint(pagetable_t pagetable) {
+  printf("page table %p\n", pagetable);
+  // 从最高层(level 2)开始递归，虚拟地址前缀为0
+  vmprint_recursive(pagetable, 2, 0);
+}
+
 // check if use global kpgtbl or not
 int test_pagetable() {
   uint64 satp = r_satp();
