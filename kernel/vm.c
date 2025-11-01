@@ -15,6 +15,8 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[];  // trampoline.S
 
+void freewalk(pagetable_t pagetable);
+
 /*
  * create a direct-map page table for the kernel.
  */
@@ -43,6 +45,59 @@ void kvminit() {
   // map the trampoline for trap entry/exit to
   // the highest virtual address in the kernel.
   kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+}
+
+// 为进程创建独立的内核页表（不包含CLINT映射）
+pagetable_t proc_kvminit() {
+  pagetable_t kpgtbl = (pagetable_t)kalloc();
+  if (kpgtbl == 0) return 0;
+  memset(kpgtbl, 0, PGSIZE);
+
+  // uart registers
+  if (mappages(kpgtbl, UART0, PGSIZE, UART0, PTE_R | PTE_W) != 0) goto err;
+
+  // virtio mmio disk interface
+  if (mappages(kpgtbl, VIRTIO0, PGSIZE, VIRTIO0, PTE_R | PTE_W) != 0) goto err;
+
+  // 注意：不映射CLINT，避免地址冲突
+
+  // PLIC
+  if (mappages(kpgtbl, PLIC, 0x400000, PLIC, PTE_R | PTE_W) != 0) goto err;
+
+  // kernel text executable and read-only
+  if (mappages(kpgtbl, KERNBASE, (uint64)etext - KERNBASE, KERNBASE, PTE_R | PTE_X) != 0) goto err;
+
+  // kernel data and physical RAM
+  if (mappages(kpgtbl, (uint64)etext, PHYSTOP - (uint64)etext, (uint64)etext, PTE_R | PTE_W) != 0) goto err;
+
+  // trampoline
+  if (mappages(kpgtbl, TRAMPOLINE, PGSIZE, (uint64)trampoline, PTE_R | PTE_X) != 0) goto err;
+
+  return kpgtbl;
+
+err:
+  // 释放页表但不释放物理页
+  freewalk(kpgtbl);
+  return 0;
+}
+
+// 释放进程的内核页表，但不释放物理页
+void proc_freekpagetable(pagetable_t kpgtbl) {
+  // 递归释放页表，清空所有PTE但不释放物理页
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = kpgtbl[i];
+    if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+      // 中间层页表，递归处理
+      uint64 child = PTE2PA(pte);
+      proc_freekpagetable((pagetable_t)child);
+      kpgtbl[i] = 0;
+    } else if (pte & PTE_V) {
+      // 叶子节点，只清除PTE，不释放物理页
+      kpgtbl[i] = 0;
+    }
+  }
+  // 最后释放页表本身
+  kfree((void *)kpgtbl);
 }
 
 // Switch h/w page table register to the kernel's page table,

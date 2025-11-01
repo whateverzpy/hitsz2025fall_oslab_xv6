@@ -35,6 +35,10 @@ void procinit(void) {
     char *pa = kalloc();
     if (pa == 0) panic("kalloc");
     uint64 va = KSTACK((int)(p - proc));
+
+    // 保存内核栈物理地址到PCB
+    p->kstack_pa = (uint64)pa;
+
     kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
     p->kstack = va;
   }
@@ -111,6 +115,21 @@ found:
     return 0;
   }
 
+  // 创建独立内核页表
+  p->k_pagetable = proc_kvminit();
+  if (p->k_pagetable == 0) {
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // 在独立内核页表中映射内核栈
+  if (mappages(p->k_pagetable, p->kstack, PGSIZE, p->kstack_pa, PTE_R | PTE_W) != 0) {
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -128,6 +147,16 @@ static void freeproc(struct proc *p) {
   p->trapframe = 0;
   if (p->pagetable) proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+
+  // 释放独立内核页表
+  if (p->k_pagetable) {
+    // 先取消内核栈的映射
+    uvmunmap(p->k_pagetable, p->kstack, 1, 0);
+    // 释放页表结构但不释放物理页
+    proc_freekpagetable(p->k_pagetable);
+  }
+  p->k_pagetable = 0;
+
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -430,7 +459,15 @@ void scheduler(void) {
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        // 切换到进程的独立内核页表
+        w_satp(MAKE_SATP(p->k_pagetable));
+        sfence_vma();
+
         swtch(&c->context, &p->context);
+
+        // 切换回全局内核页表
+        kvminithart();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
