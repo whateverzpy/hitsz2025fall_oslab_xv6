@@ -84,7 +84,7 @@ bget(uint dev, uint blockno)
     }
 
     // Not cached.
-    // Recycle an unused buffer from the current bucket.
+    // 从当前桶中查找空闲缓冲区
     for (b = bcache.bcache_heads[bucket].prev; b != &bcache.bcache_heads[bucket]; b = b->prev)
     {
         if (b->refcnt == 0)
@@ -101,7 +101,7 @@ bget(uint dev, uint blockno)
 
     release(&bcache.bcache_locks[bucket]);
 
-    // No free buffer in current bucket, search other buckets.
+    // 如果当前桶没有空闲缓冲区，则从其他桶中查找空闲缓冲区
     for (int i = 0; i < NBUCKETS; i++)
     {
         if (i == bucket)
@@ -112,9 +112,9 @@ bget(uint dev, uint blockno)
         {
             if (b->refcnt == 0)
             {
-                // Steal this buffer.
-                // To avoid deadlock, we must acquire locks in a consistent order.
-                // Release the lock on bucket `i` and acquire locks for `i` and `bucket` in order.
+                // 窃取这个缓冲区，移动到目标桶
+                // 避免死锁，按顺序获取锁
+                // 释放当前桶的锁，然后按顺序获取两个桶的锁
                 int first = i < bucket ? i : bucket;
                 int second = i < bucket ? bucket : i;
 
@@ -124,14 +124,14 @@ bget(uint dev, uint blockno)
                 if (first != second)
                     acquire(&bcache.bcache_locks[second]);
 
-                // Re-check if the buffer is still available, as state might have changed.
+                // 再次检查缓冲区是否仍然空闲
                 if (b->refcnt == 0)
                 {
-                    // remove from old bucket
+                    // 从旧桶中移除
                     b->prev->next = b->next;
                     b->next->prev = b->prev;
 
-                    // add to new bucket
+                    // 添加到新桶
                     b->next = bcache.bcache_heads[bucket].next;
                     b->prev = &bcache.bcache_heads[bucket];
                     bcache.bcache_heads[bucket].next->prev = b;
@@ -154,7 +154,7 @@ bget(uint dev, uint blockno)
                     release(&bcache.bcache_locks[second]);
                 release(&bcache.bcache_locks[first]);
 
-                // Buffer was taken, try again.
+                // 如果缓冲区不再空闲，从头开始继续查找
                 return bget(dev, blockno);
             }
         }
