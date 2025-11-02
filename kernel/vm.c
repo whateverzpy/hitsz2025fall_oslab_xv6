@@ -81,23 +81,86 @@ err:
   return 0;
 }
 
-// 释放进程的内核页表，但不释放物理页
+// 释放进程的内核页表，但不释放物理页，且避免释放共享的用户L0页表
 void proc_freekpagetable(pagetable_t kpgtbl) {
-  // 递归释放页表，清空所有PTE但不释放物理页
+  int user_l1_lim = PLIC >> PXSHIFT(1);  // PLIC 覆盖到的 L1 项数（2MB 粒度）
+
   for (int i = 0; i < 512; i++) {
     pte_t pte = kpgtbl[i];
     if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
-      // 中间层页表，递归处理
+      // 中间层页表
       uint64 child = PTE2PA(pte);
-      proc_freekpagetable((pagetable_t)child);
-      kpgtbl[i] = 0;
+      if (i == PX(2, 0)) {
+        // L2[0] -> L1：前 user_l1_lim 项共享用户的 L0，不能递归释放
+        pagetable_t kl1 = (pagetable_t)child;
+
+        // 清理 [0, user_l1_lim) 区间的 PTE 引用（不递归）
+        for (int j = 0; j < user_l1_lim; j++) kl1[j] = 0;
+
+        // 对剩余项正常递归释放（这些属于纯内核映射，如 PLIC 及以上）
+        for (int j = user_l1_lim; j < 512; j++) {
+          pte_t pte1 = kl1[j];
+          if ((pte1 & PTE_V) && (pte1 & (PTE_R | PTE_W | PTE_X)) == 0) {
+            proc_freekpagetable((pagetable_t)PTE2PA(pte1));
+            kl1[j] = 0;
+          } else if (pte1 & PTE_V) {
+            // 叶子：只清掉映射
+            kl1[j] = 0;
+          }
+        }
+        kfree((void *)kl1);
+        kpgtbl[i] = 0;
+      } else {
+        // 其他中间节点：递归释放
+        proc_freekpagetable((pagetable_t)child);
+        kpgtbl[i] = 0;
+      }
     } else if (pte & PTE_V) {
-      // 叶子节点，只清除PTE，不释放物理页
+      // 叶子节点：只清除PTE，不释放物理页
       kpgtbl[i] = 0;
     }
   }
   // 最后释放页表本身
   kfree((void *)kpgtbl);
+}
+
+// 将用户页表 [0, PLIC) 的 L1 目录项同步到内核页表，指向相同的 L0（共享叶子页表）
+int sync_pagetable(pagetable_t pagetable, pagetable_t kpagetable) {
+  // 计算用户空间在 L1 的覆盖项数（每项 2MB）
+  int user_l1_lim = PLIC >> PXSHIFT(1);  // 0x0c000000 >> 21 = 96
+
+  // 确保内核 L2[0] 存在且为中间节点
+  pte_t *k_l2e = &kpagetable[PX(2, 0)];
+  pagetable_t k_l1;
+  if ((*k_l2e & PTE_V) == 0 || (*k_l2e & (PTE_R | PTE_W | PTE_X)) != 0) {
+    k_l1 = (pagetable_t)kalloc();
+    if (k_l1 == 0) return -1;
+    memset(k_l1, 0, PGSIZE);
+    *k_l2e = PA2PTE(k_l1) | PTE_V;  // 中间节点
+  } else {
+    k_l1 = (pagetable_t)PTE2PA(*k_l2e);
+  }
+
+  // 读取用户 L2[0] -> L1
+  pte_t u_l2e = pagetable[PX(2, 0)];
+  pagetable_t u_l1 = 0;
+  if (u_l2e & PTE_V) {
+    // 只能是中间节点
+    u_l1 = (pagetable_t)PTE2PA(u_l2e);
+  }
+
+  // 同步前 user_l1_lim 项：将内核 L1 的对应项复制为用户 L1 的项（共享到相同 L0）
+  for (int j = 0; j < user_l1_lim; j++) {
+    if (u_l1) {
+      k_l1[j] = u_l1[j];
+    } else {
+      k_l1[j] = 0;
+    }
+  }
+
+  // 刷新 TLB，使得后续访问可见
+  sfence_vma();
+  return 0;
 }
 
 // Switch h/w page table register to the kernel's page table,
@@ -371,21 +434,11 @@ int copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len) {
 // Copy len bytes to dst from virtual address srcva in a given page table.
 // Return 0 on success, -1 on error.
 int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len) {
-  uint64 n, va0, pa0;
-
-  while (len > 0) {
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if (pa0 == 0) return -1;
-    n = PGSIZE - (srcva - va0);
-    if (n > len) n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
-
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
-  return 0;
+  uint64 s = r_sstatus();
+  w_sstatus(s | SSTATUS_SUM);
+  int r = copyin_new(pagetable, dst, srcva, len);
+  w_sstatus(s);
+  return r;
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -393,38 +446,11 @@ int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len) {
 // until a '\0', or max.
 // Return 0 on success, -1 on error.
 int copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max) {
-  uint64 n, va0, pa0;
-  int got_null = 0;
-
-  while (got_null == 0 && max > 0) {
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if (pa0 == 0) return -1;
-    n = PGSIZE - (srcva - va0);
-    if (n > max) n = max;
-
-    char *p = (char *)(pa0 + (srcva - va0));
-    while (n > 0) {
-      if (*p == '\0') {
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
-      }
-      --n;
-      --max;
-      p++;
-      dst++;
-    }
-
-    srcva = va0 + PGSIZE;
-  }
-  if (got_null) {
-    return 0;
-  } else {
-    return -1;
-  }
+  uint64 s = r_sstatus();
+  w_sstatus(s | SSTATUS_SUM);
+  int r = copyinstr_new(pagetable, dst, srcva, max);
+  w_sstatus(s);
+  return r;
 }
 
 // 递归打印页表项

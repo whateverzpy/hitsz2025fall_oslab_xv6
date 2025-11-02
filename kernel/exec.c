@@ -79,6 +79,9 @@ int exec(char *path, char **argv) {
   if (sp < stackbase) goto bad;
   if (copyout(pagetable, sp, (char *)ustack, (argc + 1) * sizeof(uint64)) < 0) goto bad;
 
+  // 同步新用户页表的 [0, PLIC) 映射到当前进程的内核页表
+  if (sync_pagetable(pagetable, p->k_pagetable) < 0) goto bad;
+
   // arguments to user main(argc, argv)
   // argc is returned via the system call return
   // value, which goes in a0.

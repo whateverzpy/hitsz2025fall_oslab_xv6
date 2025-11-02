@@ -229,6 +229,9 @@ void userinit(void) {
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
+  // 将用户页表 [0, PLIC) 同步到该进程的独立内核页表
+  (void)sync_pagetable(p->pagetable, p->k_pagetable);
+
   p->state = RUNNABLE;
 
   release(&p->lock);
@@ -245,8 +248,12 @@ int growproc(int n) {
     if ((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    // 用户地址空间扩展后，同步到内核页表
+    if (sync_pagetable(p->pagetable, p->k_pagetable) < 0) return -1;
   } else if (n < 0) {
     sz = uvmdealloc(p->pagetable, sz, sz + n);
+    // 收缩后也同步一次，清理可能被取消的映射
+    if (sync_pagetable(p->pagetable, p->k_pagetable) < 0) return -1;
   }
   p->sz = sz;
   return 0;
@@ -263,7 +270,6 @@ int fork(void) {
   if ((np = allocproc()) == 0) {
     return -1;
   }
-
   // Copy user memory from parent to child.
   if (uvmcopy(p->pagetable, np->pagetable, p->sz) < 0) {
     freeproc(np);
@@ -271,6 +277,12 @@ int fork(void) {
     return -1;
   }
   np->sz = p->sz;
+  // 同步子进程的用户映射到其内核页表
+  if (sync_pagetable(np->pagetable, np->k_pagetable) < 0) {
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
 
   np->parent = p;
 

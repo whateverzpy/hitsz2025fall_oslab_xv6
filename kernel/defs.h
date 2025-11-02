@@ -183,6 +183,12 @@ int copyinstr(pagetable_t, char *, uint64, uint64);
 void vmprint(pagetable_t);
 int test_pagetable();
 
+// 新增
+int sync_pagetable(pagetable_t upgtbl, pagetable_t kpgtbl);
+
+int copyin_new(pagetable_t, char *, uint64, uint64);
+int copyinstr_new(pagetable_t, char *, uint64, uint64);
+
 // plic.c
 void plicinit(void);
 void plicinithart(void);
