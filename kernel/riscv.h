@@ -33,8 +33,7 @@ static inline void w_mepc(uint64 x) { asm volatile("csrw mepc, %0" : : "r"(x)); 
 #define SSTATUS_UPIE (1L << 4)  // User Previous Interrupt Enable
 #define SSTATUS_SIE (1L << 1)   // Supervisor Interrupt Enable
 #define SSTATUS_UIE (1L << 0)   // User Interrupt Enable
-// Permit S-mode access to user pages when set (used for copyin/copyinstr fast path)
-#define SSTATUS_SUM (1L << 18)
+#define SSTATUS_SUM (1L << 18)  // 新增
 
 static inline uint64 r_sstatus() {
   uint64 x;
